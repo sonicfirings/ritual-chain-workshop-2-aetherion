@@ -205,7 +205,57 @@ contract RitualPredict {
     function createMarket(
         NewMarket calldata p
     ) external returns (uint256 marketId) {
-        // we'll fill this up
+        if (
+            bytes(p.question).length == 0 ||
+            bytes(p.oracleUrl).length == 0 ||
+            bytes(p.jsonPath).length == 0
+        ) revert EmptyString();
+        if (
+            p.bettingSeconds < MIN_BETTING_SECONDS ||
+            p.resolveDelaySeconds < MIN_RESOLVE_DELAY_SECONDS ||
+            p.bettingSeconds > MAX_MARKET_SECONDS ||
+            p.resolveDelaySeconds > MAX_MARKET_SECONDS
+        ) revert BadDuration();
+
+        marketId = ++marketCount;
+
+        uint256 closeAt = block.number + _secondsToBlocks(p.bettingSeconds);
+        uint256 resolveAt = closeAt + _secondsToBlocks(p.resolveDelaySeconds);
+        if (closeAt > type(uint64).max || resolveAt > type(uint64).max)
+            revert BadDuration();
+
+        uint64 closeBlock = uint64(closeAt);
+        uint64 resolveBlock = uint64(resolveAt);
+        uint256 scheduleId = _scheduleResolution(marketId, resolveBlock);
+
+        Market storage m = _markets[marketId];
+        m.id = marketId;
+        m.creator = msg.sender;
+        m.question = p.question;
+        m.oracleUrl = p.oracleUrl;
+        m.jsonPath = p.jsonPath;
+        m.target = p.target;
+        m.comparator = p.comparator;
+        m.closeBlock = closeBlock;
+        m.resolveBlock = resolveBlock;
+        m.scheduleId = scheduleId;
+        m.state = MarketState.Open;
+
+        emit MarketCreated(
+            marketId,
+            msg.sender,
+            p.question,
+            closeBlock,
+            resolveBlock,
+            scheduleId
+        );
+        emit ResolutionRuleSet(
+            marketId,
+            p.oracleUrl,
+            p.jsonPath,
+            p.target,
+            p.comparator
+        );
     }
 
     function bet(uint256 marketId, bool isYes) external payable {
@@ -237,7 +287,47 @@ contract RitualPredict {
         uint256 executionIndex,
         uint256 marketId
     ) external {
-        // we'll fill this up
+        if (msg.sender != RitualChain.SCHEDULER) revert OnlyScheduler();
+
+        Market storage m = _market(marketId);
+        if (m.state == MarketState.Resolved || m.state == MarketState.Invalid)
+            return;
+
+        uint8 attempt = m.attempts + 1;
+        m.attempts = attempt;
+        m.state = MarketState.Resolving;
+
+        address executor = _pickExecutor(marketId, executionIndex);
+        emit ResolutionAttempted(marketId, attempt, executor);
+        if (executor == address(0)) {
+            _fail(m, marketId, attempt, "no http executor");
+            return;
+        }
+
+        (bool ok, uint256 observed, string memory reason) = _readOracle(
+            m,
+            executor
+        );
+        if (!ok) {
+            _fail(m, marketId, attempt, reason);
+            return;
+        }
+
+        bool yesWon = _compare(observed, m.target, m.comparator);
+        uint256 winningPool = yesWon ? m.totalYes : m.totalNo;
+
+        m.observedValue = observed;
+        m.outcome = yesWon ? Outcome.Yes : Outcome.No;
+
+        if (winningPool == 0) {
+            _invalidate(m, marketId, "empty winning side");
+            IScheduler(RitualChain.SCHEDULER).cancel(m.scheduleId);
+            return;
+        }
+
+        m.state = MarketState.Resolved;
+        emit MarketResolved(marketId, m.outcome, observed);
+        IScheduler(RitualChain.SCHEDULER).cancel(m.scheduleId);
     }
 
     /// A failed oracle read is never interpreted as NO. Once the booked attempts are
@@ -377,7 +467,75 @@ contract RitualPredict {
         Market storage m,
         address executor
     ) private returns (bool ok, uint256 value, string memory reason) {
-        // we'll fill this up
+        (bool httpOk, bytes memory raw) = RitualChain.HTTP_PRECOMPILE.call(
+            _httpRequest(m, executor)
+        );
+        if (!httpOk) return (false, 0, "http precompile reverted");
+
+        (
+            bool decoded,
+            uint16 status,
+            bytes memory body,
+            string memory httpReason
+        ) = _decodeHttp(raw);
+        if (!decoded) return (false, 0, httpReason);
+        if (bytes(httpReason).length != 0) return (false, 0, httpReason);
+        if (status < 200 || status >= 300) return (false, 0, "http status");
+        if (body.length == 0) return (false, 0, "empty oracle body");
+
+        (bool jqOk, uint256 parsed) = _jqUint(m.jsonPath, string(body));
+        if (!jqOk) return (false, 0, "jq parse failed");
+
+        return (true, parsed, "");
+    }
+
+    function _httpRequest(
+        Market storage m,
+        address executor
+    ) private view returns (bytes memory) {
+        string[] memory headerKeys = new string[](0);
+        string[] memory headerValues = new string[](0);
+        bytes[] memory encryptedSecrets = new bytes[](0);
+        bytes[] memory secretSignatures = new bytes[](0);
+
+        return abi.encode(
+            executor,
+            encryptedSecrets,
+            HTTP_TTL_BLOCKS,
+            secretSignatures,
+            bytes(""),
+            m.oracleUrl,
+            RitualChain.HTTP_GET,
+            headerKeys,
+            headerValues,
+            bytes(""),
+            uint256(0),
+            uint8(0),
+            false
+        );
+    }
+
+    function _decodeHttp(
+        bytes memory raw
+    )
+        private
+        view
+        returns (
+            bool ok,
+            uint16 status,
+            bytes memory body,
+            string memory reason
+        )
+    {
+        try this.decodeHttpResponse(raw) returns (
+            uint16 decodedStatus,
+            bytes memory decodedBody,
+            string memory decodedError
+        ) {
+            return (true, decodedStatus, decodedBody, decodedError);
+        } catch {
+            return (false, 0, bytes(""), "http response decode failed");
+        }
     }
 
     /**
@@ -420,7 +578,29 @@ contract RitualPredict {
         uint256 marketId,
         uint256 executionIndex
     ) private view returns (address) {
-        // we'll fill this up
+        uint256 seed = uint256(
+            keccak256(
+                abi.encodePacked(
+                    block.prevrandao,
+                    blockhash(block.number - 1),
+                    address(this),
+                    marketId,
+                    executionIndex
+                )
+            )
+        );
+
+        (address executor, bool found) = ITEEServiceRegistry(
+            RitualChain.TEE_SERVICE_REGISTRY
+        ).pickServiceByCapability(
+                RitualChain.CAPABILITY_HTTP_CALL,
+                true,
+                seed,
+                EXECUTOR_PROBES
+            );
+
+        if (!found) return address(0);
+        return executor;
     }
 
     // ────────────────────── Ritual: scheduling ───────────────────────────
@@ -429,7 +609,24 @@ contract RitualPredict {
         uint256 marketId,
         uint64 resolveBlock
     ) private returns (uint256 callId) {
-        // we'll fill this up
+        bytes memory data = abi.encodeWithSelector(
+            this.onScheduledResolve.selector,
+            uint256(0),
+            marketId
+        );
+
+        callId = IScheduler(RitualChain.SCHEDULER).schedule(
+            data,
+            RESOLVE_GAS_LIMIT,
+            uint32(resolveBlock),
+            MAX_ATTEMPTS,
+            RETRY_INTERVAL_BLOCKS,
+            SCHEDULER_TTL_BLOCKS,
+            MIN_MAX_FEE_PER_GAS,
+            MIN_MAX_FEE_PER_GAS,
+            0,
+            address(this)
+        );
     }
 
     // ────────────────────────────── Helpers ──────────────────────────────

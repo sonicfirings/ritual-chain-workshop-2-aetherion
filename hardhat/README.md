@@ -8,11 +8,9 @@ Full architecture and the workshop runbook live in [../README.md](../README.md).
 ```
 contracts/
   RitualPredict.sol          the market: creation, betting, autonomous resolution, payouts
-  RitualPredict.t.sol        Solidity unit tests
   ritual/RitualChain.sol     canonical Ritual addresses + system contract interfaces
-  mocks/RitualMocks.sol      test-only stand-ins for the precompiles and system contracts
 test/
-  RitualPredict.e2e.ts       end-to-end walkthroughs of the workshop flow
+  RitualPredict.t.sol        Solidity unit tests with test-only Ritual system mocks
 scripts/
   block-time.ts              measure the chain's current block time
   deploy.ts                  deploy + prepay execution fees
@@ -27,7 +25,7 @@ scripts/
 ```bash
 cp .env.example .env                            # RITUAL_PRIVATE_KEY, funded from the faucet
 
-npx hardhat test                                # 33 Solidity + 2 TypeScript tests
+npx hardhat test                                # Solidity tests
 npx hardhat test solidity                       # Solidity only
 npx hardhat build                               # compile
 
@@ -37,5 +35,5 @@ PREDICT_ADDRESS=0x... npx hardhat run scripts/status.ts
 PREDICT_ADDRESS=0x... npx hardhat run scripts/fund.ts
 ```
 
-Tests run entirely against mocks — `vm.etch` puts the mock runtime code at the canonical Ritual
-addresses — so no network access or funded account is needed.
+Tests run entirely against mocks in `test/RitualPredict.t.sol`. `vm.etch` puts the mock runtime
+code at the canonical Ritual addresses, so no network access or funded account is needed.
