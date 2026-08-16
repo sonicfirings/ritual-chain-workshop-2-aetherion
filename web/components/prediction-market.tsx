@@ -17,6 +17,11 @@ type FormState = {
   resolveDelaySeconds: string;
 };
 
+type DemoStake = { yes: bigint; no: bigint; claimable: bigint; settled: boolean };
+
+const DEMO_BLOCK = 38199500n;
+const DEMO_CREATOR = "0x290a4Eb81A83418B312fb92e65fF10845818D94b" as Address;
+
 const defaultForm: FormState = {
   question: "Will ETH/USD be at least 4000 when this market resolves?",
   oracleUrl: "https://api.example.com/eth-usd",
@@ -26,6 +31,66 @@ const defaultForm: FormState = {
   bettingSeconds: "300",
   resolveDelaySeconds: "120",
 };
+
+const initialDemoMarkets: Market[] = [
+  {
+    id: 3n,
+    creator: DEMO_CREATOR,
+    question: "Will ETH/USD print above 4,000 before the next velvet close?",
+    oracleUrl: "https://oracle.example/eth-usd",
+    jsonPath: ".price",
+    target: 4000n,
+    comparator: 1,
+    closeBlock: DEMO_BLOCK + 720n,
+    resolveBlock: DEMO_BLOCK + 1320n,
+    scheduleId: 91003n,
+    totalYes: parseEther("18.42"),
+    totalNo: parseEther("11.08"),
+    state: 0,
+    outcome: 0,
+    attempts: 0,
+    observedValue: 0n,
+    invalidReason: "",
+  },
+  {
+    id: 2n,
+    creator: DEMO_CREATOR,
+    question: "Will Ritual Scheduler resolve this market within all retry windows?",
+    oracleUrl: "https://oracle.example/scheduler-health",
+    jsonPath: ".healthyPercent",
+    target: 95n,
+    comparator: 1,
+    closeBlock: DEMO_BLOCK - 300n,
+    resolveBlock: DEMO_BLOCK + 240n,
+    scheduleId: 91002n,
+    totalYes: parseEther("8.10"),
+    totalNo: parseEther("4.75"),
+    state: 2,
+    outcome: 0,
+    attempts: 1,
+    observedValue: 0n,
+    invalidReason: "",
+  },
+  {
+    id: 1n,
+    creator: DEMO_CREATOR,
+    question: "Will the demo oracle report BTC dominance at least 58?",
+    oracleUrl: "https://oracle.example/btc-dominance",
+    jsonPath: ".dominance",
+    target: 58n,
+    comparator: 1,
+    closeBlock: DEMO_BLOCK - 1800n,
+    resolveBlock: DEMO_BLOCK - 900n,
+    scheduleId: 91001n,
+    totalYes: parseEther("6.30"),
+    totalNo: parseEther("9.90"),
+    state: 3,
+    outcome: 2,
+    attempts: 1,
+    observedValue: 57n,
+    invalidReason: "",
+  },
+];
 
 function compactAddress(address?: string) {
   if (!address) return "Not connected";
@@ -47,42 +112,52 @@ function statusTone(state: number) {
 
 export function PredictionMarket() {
   const isConfigured = RITUAL_PREDICT_ADDRESS !== ZERO_ADDRESS;
+  const demoMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true" || !isConfigured;
+  const liveMode = isConfigured && !demoMode;
   const { address, chainId, isConnected } = useAccount();
   const { connectors, connect, isPending: isConnecting } = useConnect();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
   const { sendTransactionAsync, isPending: isWriting } = useSendTransaction();
   const [form, setForm] = useState<FormState>(defaultForm);
-  const [selectedMarket, setSelectedMarket] = useState<bigint | null>(null);
+  const [demoMarkets, setDemoMarkets] = useState<Market[]>(initialDemoMarkets);
+  const [demoStakes, setDemoStakes] = useState<Record<string, DemoStake>>({});
+  const [selectedMarket, setSelectedMarket] = useState<bigint | null>(3n);
   const [betAmount, setBetAmount] = useState("0.05");
   const [lastTx, setLastTx] = useState<`0x${string}` | null>(null);
+  const [notice, setNotice] = useState<string | null>(demoMode ? "Demo mode is active, so interactions are simulated locally while Ritual testnet is unavailable." : null);
   const [error, setError] = useState<string | null>(null);
 
-  const wrongChain = isConnected && chainId !== ritualChain.id;
+  const wrongChain = liveMode && isConnected && chainId !== ritualChain.id;
 
-  const { data: currentBlock } = useBlockNumber({ watch: true, query: { enabled: isConfigured } });
+  const { data: blockNumber } = useBlockNumber({ watch: true, query: { enabled: liveMode } });
+  const currentBlock = demoMode ? DEMO_BLOCK : blockNumber;
   const { data: executionBalance, refetch: refetchExecutionBalance } = useReadContract({
     address: RITUAL_PREDICT_ADDRESS,
     abi: ritualPredictAbi,
     functionName: "executionBalance",
-    query: { enabled: isConfigured },
+    query: { enabled: liveMode },
   });
-  const { data: markets = [], refetch: refetchMarkets, isLoading } = useReadContract({
+  const { data: liveMarkets = [], refetch: refetchMarkets, isLoading } = useReadContract({
     address: RITUAL_PREDICT_ADDRESS,
     abi: ritualPredictAbi,
     functionName: "getMarkets",
-    query: { enabled: isConfigured, refetchInterval: 7000 },
+    query: { enabled: liveMode, refetchInterval: 7000 },
   });
-  const { data: stakeData, refetch: refetchStake } = useReadContract({
+  const { data: liveStakeData, refetch: refetchStake } = useReadContract({
     address: RITUAL_PREDICT_ADDRESS,
     abi: ritualPredictAbi,
     functionName: "stakesOf",
     args: selectedMarket && address ? [selectedMarket, address as Address] : undefined,
-    query: { enabled: isConfigured && !!selectedMarket && !!address, refetchInterval: 7000 },
+    query: { enabled: liveMode && !!selectedMarket && !!address, refetchInterval: 7000 },
   });
 
+  const markets = demoMode ? demoMarkets : (liveMarkets as readonly Market[]);
+  const selectedDemoStake = selectedMarket ? demoStakes[selectedMarket.toString()] : undefined;
+  const stakeData = demoMode ? [selectedDemoStake?.yes ?? 0n, selectedDemoStake?.no ?? 0n, selectedDemoStake?.settled ?? false, selectedDemoStake?.claimable ?? 0n] as const : liveStakeData;
+  const executionValue = demoMode ? parseEther("0.4200") : (executionBalance ?? 0n);
+
   const totals = useMemo(() => {
-    const list = markets as readonly Market[];
-    return list.reduce((acc, market) => ({
+    return markets.reduce((acc, market) => ({
       markets: acc.markets + 1,
       pool: acc.pool + market.totalYes + market.totalNo,
       live: acc.live + (market.state === 0 ? 1 : 0),
@@ -92,7 +167,7 @@ export function PredictionMarket() {
 
   async function write(functionName: "createMarket" | "bet" | "claimWinnings" | "claimRefund" | "fundExecution", args: readonly unknown[], value?: bigint, gas = 750_000n) {
     setError(null);
-    if (!isConfigured) throw new Error("Set NEXT_PUBLIC_RITUAL_PREDICT_ADDRESS first.");
+    if (!liveMode) throw new Error("Live contract mode is disabled for this demo.");
     if (wrongChain) await switchChain({ chainId: ritualChain.id });
     const data = encodeFunctionData({ abi: ritualPredictAbi, functionName, args: args as never });
     const hash = await sendTransactionAsync({ to: RITUAL_PREDICT_ADDRESS, data, value, gas });
@@ -106,6 +181,34 @@ export function PredictionMarket() {
 
   async function submitMarket() {
     try {
+      if (demoMode) {
+        const nextId = demoMarkets.reduce((max, market) => market.id > max ? market.id : max, 0n) + 1n;
+        const closeBlock = DEMO_BLOCK + BigInt(Math.max(1, Number(form.bettingSeconds || "300")) * 5);
+        const resolveBlock = closeBlock + BigInt(Math.max(1, Number(form.resolveDelaySeconds || "120")) * 5);
+        const market: Market = {
+          id: nextId,
+          creator: DEMO_CREATOR,
+          question: form.question,
+          oracleUrl: form.oracleUrl,
+          jsonPath: form.jsonPath,
+          target: BigInt(form.target || "0"),
+          comparator: Number(form.comparator),
+          closeBlock,
+          resolveBlock,
+          scheduleId: 92000n + nextId,
+          totalYes: 0n,
+          totalNo: 0n,
+          state: 0,
+          outcome: 0,
+          attempts: 0,
+          observedValue: 0n,
+          invalidReason: "",
+        };
+        setDemoMarkets([market, ...demoMarkets]);
+        setSelectedMarket(nextId);
+        setNotice(`Demo market #${nextId} created locally. Vercel can show this while the testnet is down.`);
+        return;
+      }
       await write("createMarket", [[form.question, form.oracleUrl, form.jsonPath, BigInt(form.target), Number(form.comparator), BigInt(form.bettingSeconds), BigInt(form.resolveDelaySeconds)]], undefined, 1_600_000n);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Market creation failed");
@@ -114,7 +217,19 @@ export function PredictionMarket() {
 
   async function placeBet(marketId: bigint, isYes: boolean) {
     try {
-      await write("bet", [marketId, isYes], parseEther(betAmount || "0"), 300_000n);
+      const amount = parseEther(betAmount || "0");
+      if (demoMode) {
+        setDemoMarkets((items) => items.map((market) => market.id === marketId ? { ...market, totalYes: market.totalYes + (isYes ? amount : 0n), totalNo: market.totalNo + (isYes ? 0n : amount) } : market));
+        setDemoStakes((items) => {
+          const key = marketId.toString();
+          const current = items[key] ?? { yes: 0n, no: 0n, claimable: 0n, settled: false };
+          return { ...items, [key]: { ...current, yes: current.yes + (isYes ? amount : 0n), no: current.no + (isYes ? 0n : amount) } };
+        });
+        setSelectedMarket(marketId);
+        setNotice(`Demo bet placed: ${betAmount || "0"} RITUAL on ${isYes ? "YES" : "NO"}.`);
+        return;
+      }
+      await write("bet", [marketId, isYes], amount, 300_000n);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Bet failed");
     }
@@ -122,6 +237,15 @@ export function PredictionMarket() {
 
   async function claim(marketId: bigint, refund: boolean) {
     try {
+      if (demoMode) {
+        setDemoStakes((items) => {
+          const key = marketId.toString();
+          const current = items[key] ?? { yes: 0n, no: 0n, claimable: 0n, settled: false };
+          return { ...items, [key]: { ...current, claimable: 0n, settled: true } };
+        });
+        setNotice(refund ? "Demo refund claimed locally." : "Demo winnings claimed locally.");
+        return;
+      }
       await write(refund ? "claimRefund" : "claimWinnings", [marketId], undefined, 300_000n);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Claim failed");
@@ -141,6 +265,7 @@ export function PredictionMarket() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {demoMode && <span className="rounded-lg border border-[var(--ritual-pink)]/35 px-3 py-2 font-mono text-xs text-[var(--ritual-pink)]">Demo mode</span>}
           <span className="rounded-lg border border-[var(--champagne)]/20 px-3 py-2 font-mono text-xs text-[var(--champagne)]">Block {currentBlock?.toString() ?? "..."}</span>
           {wrongChain ? (
             <button onClick={() => switchChain({ chainId: ritualChain.id })} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--ritual-gold)] px-4 py-2 text-sm font-semibold text-[var(--ritual-gold)] hover:bg-[var(--ritual-gold)]/10" disabled={isSwitching}>
@@ -149,16 +274,16 @@ export function PredictionMarket() {
           ) : isConnected ? (
             <span className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--ritual-green)]/35 px-4 py-2 font-mono text-xs text-[var(--ritual-green)]"><Wallet size={16} /> {compactAddress(address)}</span>
           ) : (
-            <button onClick={() => connect({ connector: connectors[0] })} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--ritual-green)] px-4 py-2 text-sm font-semibold text-[var(--ritual-green)] shadow-[0_0_30px_rgba(25,209,132,0.14)] hover:bg-[var(--ritual-green)]/10" disabled={isConnecting || connectors.length === 0}>
-              <Wallet size={16} /> Connect Wallet
+            <button onClick={() => connect({ connector: connectors[0] })} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--ritual-green)] px-4 py-2 text-sm font-semibold text-[var(--ritual-green)] shadow-[0_0_30px_rgba(25,209,132,0.14)] hover:bg-[var(--ritual-green)]/10" disabled={demoMode || isConnecting || connectors.length === 0}>
+              <Wallet size={16} /> {demoMode ? "Wallet optional" : "Connect Wallet"}
             </button>
           )}
         </div>
       </nav>
 
-      {!isConfigured && (
-        <section className="rounded-xl border border-[var(--ritual-gold)]/40 bg-[var(--ritual-gold)]/10 p-4 text-sm text-[var(--champagne)]">
-          Set <span className="font-mono">NEXT_PUBLIC_RITUAL_PREDICT_ADDRESS</span> in Vercel or <span className="font-mono">web/.env.local</span> before using live contract actions.
+      {demoMode && (
+        <section className="rounded-xl border border-[var(--ritual-pink)]/35 bg-[var(--ritual-pink)]/10 p-4 text-sm text-gray-200">
+          Demo mode is running with local sample data because no live RitualPredict contract is configured. Set <span className="font-mono">NEXT_PUBLIC_DEMO_MODE=false</span> and <span className="font-mono">NEXT_PUBLIC_RITUAL_PREDICT_ADDRESS</span> when Ritual testnet is available again.
         </section>
       )}
 
@@ -173,7 +298,7 @@ export function PredictionMarket() {
             <Metric icon={<Landmark size={18} />} label="Markets" value={totals.markets.toString()} />
             <Metric icon={<Activity size={18} />} label="Open" value={totals.live.toString()} />
             <Metric icon={<Trophy size={18} />} label="Resolved" value={totals.resolved.toString()} />
-            <Metric icon={<LockKeyhole size={18} />} label="Execution" value={`${Number(formatEther(executionBalance ?? 0n)).toFixed(4)} RITUAL`} />
+            <Metric icon={<LockKeyhole size={18} />} label="Execution" value={`${Number(formatEther(executionValue)).toFixed(4)} RITUAL`} />
           </div>
         </div>
 
@@ -197,8 +322,8 @@ export function PredictionMarket() {
               <Input label="Bet seconds" value={form.bettingSeconds} onChange={(bettingSeconds) => setForm({ ...form, bettingSeconds })} />
               <Input label="Delay seconds" value={form.resolveDelaySeconds} onChange={(resolveDelaySeconds) => setForm({ ...form, resolveDelaySeconds })} />
             </div>
-            <button onClick={submitMarket} disabled={!isConnected || isWriting || !isConfigured} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-[var(--ritual-green)] px-4 py-3 text-sm font-semibold text-[var(--ritual-green)] hover:bg-[var(--ritual-green)]/10 disabled:hover:bg-transparent">
-              {isWriting ? <Loader2 size={16} className="animate-spin" /> : <CalendarClock size={16} />} Create scheduled market
+            <button onClick={submitMarket} disabled={(!demoMode && !isConnected) || isWriting || (!demoMode && !isConfigured)} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-[var(--ritual-green)] px-4 py-3 text-sm font-semibold text-[var(--ritual-green)] hover:bg-[var(--ritual-green)]/10 disabled:hover:bg-transparent">
+              {isWriting ? <Loader2 size={16} className="animate-spin" /> : <CalendarClock size={16} />} {demoMode ? "Create demo market" : "Create scheduled market"}
             </button>
           </div>
         </div>
@@ -211,9 +336,9 @@ export function PredictionMarket() {
               <p className="font-mono text-xs uppercase text-[var(--ritual-pink)]">market floor</p>
               <h2 className="text-2xl font-semibold text-gray-100">Live positions</h2>
             </div>
-            <button onClick={() => refetchMarkets()} className="grid h-11 w-11 place-items-center rounded-lg border border-white/10 text-gray-300 hover:border-[var(--ritual-green)] hover:text-[var(--ritual-green)]" aria-label="Refresh markets"><RefreshCw size={16} /></button>
+            <button onClick={() => demoMode ? setNotice("Demo data refreshed locally.") : refetchMarkets()} className="grid h-11 w-11 place-items-center rounded-lg border border-white/10 text-gray-300 hover:border-[var(--ritual-green)] hover:text-[var(--ritual-green)]" aria-label="Refresh markets"><RefreshCw size={16} /></button>
           </div>
-          {isLoading ? <EmptyState text="Loading markets from Ritual Chain" /> : (markets as readonly Market[]).length === 0 ? <EmptyState text="No markets yet. Create the first one above." /> : (markets as readonly Market[]).map((market) => <MarketCard key={market.id.toString()} market={market} currentBlock={currentBlock} selected={selectedMarket === market.id} onSelect={() => setSelectedMarket(market.id)} onBet={placeBet} betAmount={betAmount} />)}
+          {isLoading && !demoMode ? <EmptyState text="Loading markets from Ritual Chain" /> : markets.length === 0 ? <EmptyState text="No markets yet. Create the first one above." /> : markets.map((market) => <MarketCard key={market.id.toString()} market={market} currentBlock={currentBlock} selected={selectedMarket === market.id} onSelect={() => setSelectedMarket(market.id)} onBet={placeBet} betAmount={betAmount} />)}
         </div>
 
         <aside className="h-fit rounded-xl border border-white/10 bg-black/45 p-5">
@@ -232,10 +357,11 @@ export function PredictionMarket() {
             <Line label="Claimable" value={`${formatEther(stakeData?.[3] ?? 0n)} RITUAL`} highlight />
           </div>
           <div className="mt-4 grid gap-2">
-            <button onClick={() => selectedMarket && claim(selectedMarket, false)} disabled={!selectedMarket || !isConnected || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[var(--ritual-lime)] px-4 py-2 text-sm font-semibold text-[var(--ritual-lime)] hover:bg-[var(--ritual-lime)]/10"><Trophy size={16} /> Claim winnings</button>
-            <button onClick={() => selectedMarket && claim(selectedMarket, true)} disabled={!selectedMarket || !isConnected || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-400/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10"><RefreshCw size={16} /> Claim refund</button>
+            <button onClick={() => selectedMarket && claim(selectedMarket, false)} disabled={!selectedMarket || (!demoMode && !isConnected) || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[var(--ritual-lime)] px-4 py-2 text-sm font-semibold text-[var(--ritual-lime)] hover:bg-[var(--ritual-lime)]/10"><Trophy size={16} /> Claim winnings</button>
+            <button onClick={() => selectedMarket && claim(selectedMarket, true)} disabled={!selectedMarket || (!demoMode && !isConnected) || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-400/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10"><RefreshCw size={16} /> Claim refund</button>
           </div>
           {lastTx && <a className="mt-4 block truncate rounded-lg border border-[var(--ritual-green)]/20 bg-[var(--ritual-green)]/10 px-3 py-2 font-mono text-xs text-[var(--ritual-green)]" href={`https://explorer.ritualfoundation.org/tx/${lastTx}`} target="_blank" rel="noreferrer">Last tx: {lastTx}</a>}
+          {notice && <p className="mt-4 rounded-lg border border-[var(--ritual-pink)]/30 bg-[var(--ritual-pink)]/10 px-3 py-2 text-sm text-gray-200">{notice}</p>}
           {error && <p className="mt-4 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p>}
         </aside>
       </section>
