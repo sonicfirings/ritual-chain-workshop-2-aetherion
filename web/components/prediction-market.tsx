@@ -3,7 +3,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { encodeFunctionData, formatEther, parseEther, type Address } from "viem";
 import { useAccount, useBlockNumber, useConnect, useReadContract, useSendTransaction, useSwitchChain } from "wagmi";
-import { Activity, BadgeDollarSign, CalendarClock, Check, ChevronDown, Gem, Landmark, Loader2, LockKeyhole, Plus, RefreshCw, Sparkles, Trophy, Wallet } from "lucide-react";
+import { Activity, BadgeDollarSign, CalendarClock, Check, ChevronDown, Landmark, Loader2, LockKeyhole, Plus, RefreshCw, Rocket, Sparkles, Trophy, Wallet } from "lucide-react";
 import { ritualChain } from "@/lib/chain";
 import { comparatorLabel, Market, outcomeLabel, ritualPredictAbi, RITUAL_PREDICT_ADDRESS, stateLabel, ZERO_ADDRESS } from "@/lib/contract";
 
@@ -18,6 +18,7 @@ type FormState = {
 };
 
 type DemoStake = { yes: bigint; no: bigint; claimable: bigint; settled: boolean };
+type ActiveTab = "markets" | "create";
 
 const DEMO_BLOCK = 38199500n;
 const DEMO_CREATOR = "0x290a4Eb81A83418B312fb92e65fF10845818D94b" as Address;
@@ -123,8 +124,9 @@ export function PredictionMarket() {
   const [demoStakes, setDemoStakes] = useState<Record<string, DemoStake>>({});
   const [selectedMarket, setSelectedMarket] = useState<bigint | null>(3n);
   const [betAmount, setBetAmount] = useState("0.05");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("markets");
   const [lastTx, setLastTx] = useState<`0x${string}` | null>(null);
-  const [notice, setNotice] = useState<string | null>(demoMode ? "Demo mode is active, so interactions are simulated locally while Ritual testnet is unavailable." : null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const wrongChain = liveMode && isConnected && chainId !== ritualChain.id;
@@ -206,7 +208,8 @@ export function PredictionMarket() {
         };
         setDemoMarkets([market, ...demoMarkets]);
         setSelectedMarket(nextId);
-        setNotice(`Demo market #${nextId} created locally. Vercel can show this while the testnet is down.`);
+        setActiveTab("markets");
+        setNotice(`Demo market #${nextId} created locally.`);
         return;
       }
       await write("createMarket", [[form.question, form.oracleUrl, form.jsonPath, BigInt(form.target), Number(form.comparator), BigInt(form.bettingSeconds), BigInt(form.resolveDelaySeconds)]], undefined, 1_600_000n);
@@ -258,11 +261,11 @@ export function PredictionMarket() {
 
       <nav className="flex flex-col gap-3 border-b border-white/10 pb-4 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-xl border border-[var(--ritual-pink)]/35 bg-[var(--rosewood)]/50 text-[var(--ritual-pink)] shadow-[0_0_35px_rgba(255,29,206,0.14)]"><Gem size={22} /></div>
-          <div>
-            <p className="font-mono text-xs uppercase text-[var(--ritual-green)]">Ritual Scheduler + HTTP + jq</p>
-            <h1 className="font-[var(--font-display)] text-2xl font-black text-gray-100 sm:text-3xl">Ritual Predict</h1>
+          <div className="relative grid h-12 w-12 place-items-center rounded-xl border border-[var(--champagne)]/25 bg-[var(--rosewood)]/60 shadow-[0_0_35px_rgba(255,29,206,0.16)]">
+            <Rocket size={21} className="absolute -translate-x-1 -translate-y-1 rotate-[-35deg] text-[var(--ritual-green)]" />
+            <Rocket size={21} className="absolute translate-x-1 translate-y-1 rotate-[145deg] text-[var(--ritual-pink)]" />
           </div>
+          <h1 className="font-[var(--font-display)] text-2xl font-black text-gray-100 sm:text-3xl">Ritual Predict</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {demoMode && <span className="rounded-lg border border-[var(--ritual-pink)]/35 px-3 py-2 font-mono text-xs text-[var(--ritual-pink)]">Demo mode</span>}
@@ -274,39 +277,79 @@ export function PredictionMarket() {
           ) : isConnected ? (
             <span className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--ritual-green)]/35 px-4 py-2 font-mono text-xs text-[var(--ritual-green)]"><Wallet size={16} /> {compactAddress(address)}</span>
           ) : (
-            <button onClick={() => connect({ connector: connectors[0] })} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--ritual-green)] px-4 py-2 text-sm font-semibold text-[var(--ritual-green)] shadow-[0_0_30px_rgba(25,209,132,0.14)] hover:bg-[var(--ritual-green)]/10" disabled={demoMode || isConnecting || connectors.length === 0}>
-              <Wallet size={16} /> {demoMode ? "Wallet optional" : "Connect Wallet"}
+            <button onClick={() => connect({ connector: connectors[0] })} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--ritual-green)] px-4 py-2 text-sm font-semibold text-[var(--ritual-green)] shadow-[0_0_30px_rgba(25,209,132,0.14)] hover:bg-[var(--ritual-green)]/10" disabled={isConnecting || connectors.length === 0}>
+              <Wallet size={16} /> Connect Wallet
             </button>
           )}
         </div>
       </nav>
 
-      {demoMode && (
-        <section className="rounded-xl border border-[var(--ritual-pink)]/35 bg-[var(--ritual-pink)]/10 p-4 text-sm text-gray-200">
-          Demo mode is running with local sample data because no live RitualPredict contract is configured. Set <span className="font-mono">NEXT_PUBLIC_DEMO_MODE=false</span> and <span className="font-mono">NEXT_PUBLIC_RITUAL_PREDICT_ADDRESS</span> when Ritual testnet is available again.
-        </section>
+      <div className="flex w-full max-w-md gap-2 rounded-xl border border-white/10 bg-black/45 p-1">
+        <TabButton active={activeTab === "markets"} onClick={() => setActiveTab("markets")}>Markets</TabButton>
+        <TabButton active={activeTab === "create"} onClick={() => setActiveTab("create")}>New Market</TabButton>
+      </div>
+
+      {activeTab === "markets" && (
+        <>
+          <section className="rounded-xl border border-white/10 bg-black/45 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:p-7">
+            <div className="mb-10 max-w-3xl">
+              <p className="mb-3 inline-flex items-center gap-2 rounded-lg border border-[var(--ritual-pink)]/30 px-3 py-1 font-mono text-xs uppercase text-[var(--ritual-pink)]"><Sparkles size={14} /> self-resolving market desk</p>
+              <h2 className="font-[var(--font-display)] text-4xl font-black leading-tight text-gray-100 sm:text-5xl">Velvet odds, verified outcomes.</h2>
+              <p className="mt-4 max-w-2xl text-base leading-7 text-gray-300">Create YES/NO markets that close by block number, wake by Ritual Scheduler, read an oracle through a TEE-backed HTTP call, extract with jq, and settle without a keeper.</p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-4">
+              <Metric icon={<Landmark size={18} />} label="Markets" value={totals.markets.toString()} />
+              <Metric icon={<Activity size={18} />} label="Open" value={totals.live.toString()} />
+              <Metric icon={<Trophy size={18} />} label="Resolved" value={totals.resolved.toString()} />
+              <Metric icon={<LockKeyhole size={18} />} label="Execution" value={`${Number(formatEther(executionValue)).toFixed(4)} RITUAL`} />
+            </div>
+          </section>
+
+          <section id="markets" className="grid gap-4 lg:grid-cols-[1fr_340px]">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-mono text-xs uppercase text-[var(--ritual-pink)]">market floor</p>
+                  <h2 className="text-2xl font-semibold text-gray-100">Live positions</h2>
+                </div>
+                <button onClick={() => demoMode ? setNotice("Demo data refreshed locally.") : refetchMarkets()} className="grid h-11 w-11 place-items-center rounded-lg border border-white/10 text-gray-300 hover:border-[var(--ritual-green)] hover:text-[var(--ritual-green)]" aria-label="Refresh markets"><RefreshCw size={16} /></button>
+              </div>
+              {isLoading && !demoMode ? <EmptyState text="Loading markets from Ritual Chain" /> : markets.length === 0 ? <EmptyState text="No markets yet. Create the first one from the New Market tab." /> : markets.map((market) => <MarketCard key={market.id.toString()} market={market} currentBlock={currentBlock} selected={selectedMarket === market.id} onSelect={() => setSelectedMarket(market.id)} onBet={placeBet} betAmount={betAmount} />)}
+            </div>
+
+            <aside className="h-fit rounded-xl border border-white/10 bg-black/45 p-5">
+              <div className="mb-5 flex items-center justify-between">
+                <div>
+                  <p className="font-mono text-xs uppercase text-[var(--ritual-green)]">your ticket</p>
+                  <h3 className="text-xl font-semibold text-gray-100">Position</h3>
+                </div>
+                <BadgeDollarSign className="text-[var(--champagne)]" />
+              </div>
+              <Input label="Bet amount (RITUAL)" value={betAmount} onChange={setBetAmount} />
+              <div className="mt-4 space-y-3 rounded-lg border border-white/10 bg-[var(--ritual-elevated)]/70 p-4">
+                <Line label="Selected" value={selectedMarket ? `#${selectedMarket}` : "None"} />
+                <Line label="YES stake" value={`${formatEther(stakeData?.[0] ?? 0n)} RITUAL`} />
+                <Line label="NO stake" value={`${formatEther(stakeData?.[1] ?? 0n)} RITUAL`} />
+                <Line label="Claimable" value={`${formatEther(stakeData?.[3] ?? 0n)} RITUAL`} highlight />
+              </div>
+              <div className="mt-4 grid gap-2">
+                <button onClick={() => selectedMarket && claim(selectedMarket, false)} disabled={!selectedMarket || (!demoMode && !isConnected) || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[var(--ritual-lime)] px-4 py-2 text-sm font-semibold text-[var(--ritual-lime)] hover:bg-[var(--ritual-lime)]/10"><Trophy size={16} /> Claim winnings</button>
+                <button onClick={() => selectedMarket && claim(selectedMarket, true)} disabled={!selectedMarket || (!demoMode && !isConnected) || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-400/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10"><RefreshCw size={16} /> Claim refund</button>
+              </div>
+              {lastTx && <a className="mt-4 block truncate rounded-lg border border-[var(--ritual-green)]/20 bg-[var(--ritual-green)]/10 px-3 py-2 font-mono text-xs text-[var(--ritual-green)]" href={`https://explorer.ritualfoundation.org/tx/${lastTx}`} target="_blank" rel="noreferrer">Last tx: {lastTx}</a>}
+              {notice && <p className="mt-4 rounded-lg border border-[var(--ritual-pink)]/30 bg-[var(--ritual-pink)]/10 px-3 py-2 text-sm text-gray-200">{notice}</p>}
+              {error && <p className="mt-4 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p>}
+            </aside>
+          </section>
+        </>
       )}
 
-      <section className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
-        <div className="min-h-[320px] rounded-xl border border-white/10 bg-black/45 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:p-7">
-          <div className="mb-10 max-w-3xl">
-            <p className="mb-3 inline-flex items-center gap-2 rounded-lg border border-[var(--ritual-pink)]/30 px-3 py-1 font-mono text-xs uppercase text-[var(--ritual-pink)]"><Sparkles size={14} /> self-resolving market desk</p>
-            <h2 className="font-[var(--font-display)] text-4xl font-black leading-tight text-gray-100 sm:text-5xl">Velvet odds, verified outcomes.</h2>
-            <p className="mt-4 max-w-2xl text-base leading-7 text-gray-300">Create YES/NO markets that close by block number, wake by Ritual Scheduler, read an oracle through a TEE-backed HTTP call, extract with jq, and settle without a keeper.</p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-4">
-            <Metric icon={<Landmark size={18} />} label="Markets" value={totals.markets.toString()} />
-            <Metric icon={<Activity size={18} />} label="Open" value={totals.live.toString()} />
-            <Metric icon={<Trophy size={18} />} label="Resolved" value={totals.resolved.toString()} />
-            <Metric icon={<LockKeyhole size={18} />} label="Execution" value={`${Number(formatEther(executionValue)).toFixed(4)} RITUAL`} />
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-white/10 bg-[var(--ritual-elevated)]/85 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
-          <div className="mb-4 flex items-center justify-between gap-3">
+      {activeTab === "create" && (
+        <section className="mx-auto w-full max-w-3xl rounded-xl border border-white/10 bg-[var(--ritual-elevated)]/85 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:p-7">
+          <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <p className="font-mono text-xs uppercase text-[var(--ritual-green)]">new market</p>
-              <h3 className="text-xl font-semibold text-gray-100">Resolution recipe</h3>
+              <h3 className="text-2xl font-semibold text-gray-100">Resolution recipe</h3>
             </div>
             <Plus className="text-[var(--ritual-pink)]" />
           </div>
@@ -326,47 +369,14 @@ export function PredictionMarket() {
               {isWriting ? <Loader2 size={16} className="animate-spin" /> : <CalendarClock size={16} />} {demoMode ? "Create demo market" : "Create scheduled market"}
             </button>
           </div>
-        </div>
-      </section>
-
-      <section id="markets" className="grid gap-4 lg:grid-cols-[1fr_340px]">
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="font-mono text-xs uppercase text-[var(--ritual-pink)]">market floor</p>
-              <h2 className="text-2xl font-semibold text-gray-100">Live positions</h2>
-            </div>
-            <button onClick={() => demoMode ? setNotice("Demo data refreshed locally.") : refetchMarkets()} className="grid h-11 w-11 place-items-center rounded-lg border border-white/10 text-gray-300 hover:border-[var(--ritual-green)] hover:text-[var(--ritual-green)]" aria-label="Refresh markets"><RefreshCw size={16} /></button>
-          </div>
-          {isLoading && !demoMode ? <EmptyState text="Loading markets from Ritual Chain" /> : markets.length === 0 ? <EmptyState text="No markets yet. Create the first one above." /> : markets.map((market) => <MarketCard key={market.id.toString()} market={market} currentBlock={currentBlock} selected={selectedMarket === market.id} onSelect={() => setSelectedMarket(market.id)} onBet={placeBet} betAmount={betAmount} />)}
-        </div>
-
-        <aside className="h-fit rounded-xl border border-white/10 bg-black/45 p-5">
-          <div className="mb-5 flex items-center justify-between">
-            <div>
-              <p className="font-mono text-xs uppercase text-[var(--ritual-green)]">your ticket</p>
-              <h3 className="text-xl font-semibold text-gray-100">Position</h3>
-            </div>
-            <BadgeDollarSign className="text-[var(--champagne)]" />
-          </div>
-          <Input label="Bet amount (RITUAL)" value={betAmount} onChange={setBetAmount} />
-          <div className="mt-4 space-y-3 rounded-lg border border-white/10 bg-[var(--ritual-elevated)]/70 p-4">
-            <Line label="Selected" value={selectedMarket ? `#${selectedMarket}` : "None"} />
-            <Line label="YES stake" value={`${formatEther(stakeData?.[0] ?? 0n)} RITUAL`} />
-            <Line label="NO stake" value={`${formatEther(stakeData?.[1] ?? 0n)} RITUAL`} />
-            <Line label="Claimable" value={`${formatEther(stakeData?.[3] ?? 0n)} RITUAL`} highlight />
-          </div>
-          <div className="mt-4 grid gap-2">
-            <button onClick={() => selectedMarket && claim(selectedMarket, false)} disabled={!selectedMarket || (!demoMode && !isConnected) || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-[var(--ritual-lime)] px-4 py-2 text-sm font-semibold text-[var(--ritual-lime)] hover:bg-[var(--ritual-lime)]/10"><Trophy size={16} /> Claim winnings</button>
-            <button onClick={() => selectedMarket && claim(selectedMarket, true)} disabled={!selectedMarket || (!demoMode && !isConnected) || isWriting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-400/50 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/10"><RefreshCw size={16} /> Claim refund</button>
-          </div>
-          {lastTx && <a className="mt-4 block truncate rounded-lg border border-[var(--ritual-green)]/20 bg-[var(--ritual-green)]/10 px-3 py-2 font-mono text-xs text-[var(--ritual-green)]" href={`https://explorer.ritualfoundation.org/tx/${lastTx}`} target="_blank" rel="noreferrer">Last tx: {lastTx}</a>}
-          {notice && <p className="mt-4 rounded-lg border border-[var(--ritual-pink)]/30 bg-[var(--ritual-pink)]/10 px-3 py-2 text-sm text-gray-200">{notice}</p>}
-          {error && <p className="mt-4 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p>}
-        </aside>
-      </section>
+        </section>
+      )}
     </main>
   );
+}
+
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return <button onClick={onClick} className={`min-h-11 flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition ${active ? "border border-[var(--ritual-pink)]/50 bg-[var(--ritual-pink)]/10 text-[var(--ritual-pink)]" : "border border-transparent text-gray-300 hover:border-white/10 hover:text-gray-100"}`}>{children}</button>;
 }
 
 function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
