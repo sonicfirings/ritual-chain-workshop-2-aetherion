@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { encodeFunctionData, formatEther, parseEther, type Address } from "viem";
 import { useAccount, useBlockNumber, useConnect, useReadContract, useSendTransaction, useSwitchChain } from "wagmi";
 import { Activity, ArrowLeft, BadgeDollarSign, CalendarClock, Check, Landmark, Link as LinkIcon, Loader2, LockKeyhole, Plus, RefreshCw, Rocket, Star, Trophy, Wallet } from "lucide-react";
@@ -77,6 +77,24 @@ function pct(part: bigint, total: bigint) {
   return Number((part * 100n) / total);
 }
 
+function clampPct(value: number) {
+  return Math.max(1, Math.min(99, Math.round(value)));
+}
+
+function initialTrendFor(market: Market) {
+  const base = pct(market.totalYes, market.totalYes + market.totalNo);
+  return Array.from({ length: 22 }, (_, index) => clampPct(base + Math.sin(index / 2) * 4 + (index % 3 - 1) * 1.5));
+}
+
+function sparklinePath(values: number[], width: number, height: number) {
+  if (values.length === 0) return "";
+  return values.map((value, index) => {
+    const x = (index / Math.max(1, values.length - 1)) * width;
+    const y = height - (value / 100) * height;
+    return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+  }).join(" ");
+}
+
 function oneDecimalRitual(value: bigint) {
   const amount = Number(formatEther(value));
   if (amount >= 1000) return `${(amount / 1000).toFixed(1)}K`;
@@ -111,6 +129,8 @@ export function PredictionMarket() {
   const { sendTransactionAsync, isPending: isWriting } = useSendTransaction();
   const [form, setForm] = useState<FormState>(defaultForm);
   const [demoMarkets, setDemoMarkets] = useState<Market[]>(initialDemoMarkets);
+  const [demoBlock, setDemoBlock] = useState(DEMO_BLOCK);
+  const [demoTrends, setDemoTrends] = useState<Record<string, number[]>>(() => Object.fromEntries(initialDemoMarkets.map((market) => [market.id.toString(), initialTrendFor(market)])));
   const [demoStakes, setDemoStakes] = useState<Record<string, DemoStake>>({});
   const [selectedMarket, setSelectedMarket] = useState<bigint | null>(9n);
   const [focusedMarketId, setFocusedMarketId] = useState<bigint | null>(null);
@@ -123,7 +143,7 @@ export function PredictionMarket() {
   const wrongChain = liveMode && isConnected && chainId !== ritualChain.id;
 
   const { data: blockNumber } = useBlockNumber({ watch: true, query: { enabled: liveMode } });
-  const currentBlock = demoMode ? DEMO_BLOCK : blockNumber;
+  const currentBlock = demoMode ? demoBlock : blockNumber;
   const { data: executionBalance, refetch: refetchExecutionBalance } = useReadContract({
     address: RITUAL_PREDICT_ADDRESS,
     abi: ritualPredictAbi,
@@ -149,6 +169,43 @@ export function PredictionMarket() {
   const selectedDemoStake = selectedMarket ? demoStakes[selectedMarket.toString()] : undefined;
   const stakeData = demoMode ? [selectedDemoStake?.yes ?? 0n, selectedDemoStake?.no ?? 0n, selectedDemoStake?.settled ?? false, selectedDemoStake?.claimable ?? 0n] as const : liveStakeData;
   const executionValue = demoMode ? parseEther("0.4200") : (executionBalance ?? 0n);
+
+  useEffect(() => {
+    if (!demoMode) return;
+    const timer = window.setInterval(() => {
+      setDemoBlock((block) => block + 1n);
+      setDemoMarkets((items) => items.map((market) => {
+        if (market.state !== 0 && market.state !== 2) return market;
+        const yesPct = pct(market.totalYes, market.totalYes + market.totalNo);
+        const meanReversion = yesPct > 70 ? -0.18 : yesPct < 30 ? 0.18 : 0;
+        const yesMove = BigInt(Math.floor(Math.random() * 9) + 2) * 100_000_000_000_000n;
+        const noMove = BigInt(Math.floor(Math.random() * 9) + 2) * 100_000_000_000_000n;
+        const yesWinsTick = Math.random() + meanReversion > 0.5;
+        return {
+          ...market,
+          totalYes: market.totalYes + (yesWinsTick ? yesMove : 0n),
+          totalNo: market.totalNo + (yesWinsTick ? 0n : noMove),
+        };
+      }));
+    }, 1600);
+    return () => window.clearInterval(timer);
+  }, [demoMode]);
+
+  useEffect(() => {
+    if (!demoMode) return;
+    setDemoTrends((previous) => {
+      const next: Record<string, number[]> = {};
+      for (const market of demoMarkets) {
+        const key = market.id.toString();
+        const base = pct(market.totalYes, market.totalYes + market.totalNo);
+        const old = previous[key] ?? initialTrendFor(market);
+        const last = old[old.length - 1] ?? base;
+        const drift = market.state === 0 || market.state === 2 ? (base - last) * 0.45 + (Math.random() * 4 - 2) : 0;
+        next[key] = [...old.slice(-21), clampPct(last + drift)];
+      }
+      return next;
+    });
+  }, [demoMode, demoMarkets]);
 
   const totals = useMemo(() => {
     return markets.reduce((acc, market) => ({
@@ -184,8 +241,11 @@ export function PredictionMarket() {
         const nextId = demoMarkets.reduce((max, market) => market.id > max ? market.id : max, 0n) + 1n;
         const closeBlock = DEMO_BLOCK + BigInt(Math.max(1, Number(form.bettingSeconds || "300")) * 5);
         const resolveBlock = closeBlock + BigInt(Math.max(1, Number(form.resolveDelaySeconds || "120")) * 5);
-        const market = makeDemoMarket(nextId, form.question, form.jsonPath, BigInt(form.target || "0"), Number(form.comparator), "0", "0", 0, closeBlock - DEMO_BLOCK, resolveBlock - DEMO_BLOCK);
+        const market = makeDemoMarket(nextId, form.question, form.jsonPath, BigInt(form.target || "0"), Number(form.comparator), "0", "0", 0, closeBlock - demoBlock, resolveBlock - demoBlock);
         market.oracleUrl = form.oracleUrl;
+        market.closeBlock = closeBlock;
+        market.resolveBlock = resolveBlock;
+        setDemoTrends((items) => ({ ...items, [nextId.toString()]: initialTrendFor(market) }));
         setDemoMarkets([market, ...demoMarkets]);
         setSelectedMarket(nextId);
         setFocusedMarketId(nextId);
@@ -239,7 +299,7 @@ export function PredictionMarket() {
   if (focusedMarket) {
     return (
       <Shell demoMode={demoMode} currentBlock={currentBlock} wrongChain={wrongChain} isSwitching={isSwitching} switchToRitual={() => switchChain({ chainId: ritualChain.id })} isConnected={isConnected} address={address} connectWallet={() => connect({ connector: connectors[0] })} canConnect={!isConnecting && connectors.length > 0}>
-        <MarketDetail market={focusedMarket} currentBlock={currentBlock} betAmount={betAmount} setBetAmount={setBetAmount} stakeData={stakeData} onBack={() => setFocusedMarketId(null)} onBet={placeBet} onClaim={claim} isWriting={isWriting} demoMode={demoMode} isConnected={isConnected} notice={notice} error={error} lastTx={lastTx} />
+        <MarketDetail market={focusedMarket} trend={demoTrends[focusedMarket.id.toString()] ?? initialTrendFor(focusedMarket)} currentBlock={currentBlock} betAmount={betAmount} setBetAmount={setBetAmount} stakeData={stakeData} onBack={() => setFocusedMarketId(null)} onBet={placeBet} onClaim={claim} isWriting={isWriting} demoMode={demoMode} isConnected={isConnected} notice={notice} error={error} lastTx={lastTx} />
       </Shell>
     );
   }
@@ -268,7 +328,7 @@ export function PredictionMarket() {
               </div>
               <button onClick={() => demoMode ? setNotice("Demo data refreshed locally.") : refetchMarkets()} className="grid h-11 w-11 place-items-center rounded-lg border border-white/10 text-gray-300 hover:border-[var(--ritual-green)] hover:text-[var(--ritual-green)]" aria-label="Refresh markets"><RefreshCw size={16} /></button>
             </div>
-            {isLoading && !demoMode ? <EmptyState text="Loading markets from Ritual Chain" /> : markets.length === 0 ? <EmptyState text="No markets yet. Create the first one from the New Market tab." /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{markets.map((market) => <MarketTile key={market.id.toString()} market={market} currentBlock={currentBlock} onOpen={() => openMarket(market.id)} />)}</div>}
+            {isLoading && !demoMode ? <EmptyState text="Loading markets from Ritual Chain" /> : markets.length === 0 ? <EmptyState text="No markets yet. Create the first one from the New Market tab." /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{markets.map((market) => <MarketTile key={market.id.toString()} market={market} trend={demoTrends[market.id.toString()] ?? initialTrendFor(market)} currentBlock={currentBlock} onOpen={() => openMarket(market.id)} />)}</div>}
           </section>
         </>
       )}
@@ -337,7 +397,7 @@ function Shell({ children, demoMode, currentBlock, wrongChain, isSwitching, swit
   );
 }
 
-function MarketTile({ market, currentBlock, onOpen }: { market: Market; currentBlock?: bigint; onOpen: () => void }) {
+function MarketTile({ market, trend, currentBlock, onOpen }: { market: Market; trend: number[]; currentBlock?: bigint; onOpen: () => void }) {
   const total = market.totalYes + market.totalNo;
   const yesPct = pct(market.totalYes, total);
   const noPct = 100 - yesPct;
@@ -357,7 +417,8 @@ function MarketTile({ market, currentBlock, onOpen }: { market: Market; currentB
         <span className="font-mono text-2xl font-bold text-[var(--ritual-green)]">{yesPct}%</span>
         <span className="font-mono text-2xl font-bold text-red-300">{noPct}%</span>
       </div>
-      <div className="mb-4 h-2 overflow-hidden rounded-full bg-red-500/25"><div className="h-full bg-[var(--ritual-green)]" style={{ width: `${yesPct}%` }} /></div>
+      <Sparkline values={trend} compact />
+      <div className="mb-4 mt-3 h-2 overflow-hidden rounded-full bg-red-500/25"><div className="h-full bg-[var(--ritual-green)] transition-all duration-700" style={{ width: `${yesPct}%` }} /></div>
       <div className="grid grid-cols-2 gap-2">
         <span className="rounded-lg border border-[var(--ritual-green)]/35 bg-[var(--ritual-green)]/10 px-3 py-2 text-center text-sm font-bold text-[var(--ritual-green)]">YES {yesPct}%</span>
         <span className="rounded-lg border border-red-400/35 bg-red-500/10 px-3 py-2 text-center text-sm font-bold text-red-300">NO {noPct}%</span>
@@ -371,7 +432,7 @@ function MarketTile({ market, currentBlock, onOpen }: { market: Market; currentB
   );
 }
 
-function MarketDetail({ market, currentBlock, betAmount, setBetAmount, stakeData, onBack, onBet, onClaim, isWriting, demoMode, isConnected, notice, error, lastTx }: { market: Market; currentBlock?: bigint; betAmount: string; setBetAmount: (value: string) => void; stakeData?: readonly [bigint, bigint, boolean, bigint]; onBack: () => void; onBet: (marketId: bigint, isYes: boolean) => void; onClaim: (marketId: bigint, refund: boolean) => void; isWriting: boolean; demoMode: boolean; isConnected: boolean; notice: string | null; error: string | null; lastTx: `0x${string}` | null }) {
+function MarketDetail({ market, trend, currentBlock, betAmount, setBetAmount, stakeData, onBack, onBet, onClaim, isWriting, demoMode, isConnected, notice, error, lastTx }: { market: Market; trend: number[]; currentBlock?: bigint; betAmount: string; setBetAmount: (value: string) => void; stakeData?: readonly [bigint, bigint, boolean, bigint]; onBack: () => void; onBet: (marketId: bigint, isYes: boolean) => void; onClaim: (marketId: bigint, refund: boolean) => void; isWriting: boolean; demoMode: boolean; isConnected: boolean; notice: string | null; error: string | null; lastTx: `0x${string}` | null }) {
   const total = market.totalYes + market.totalNo;
   const yesPct = pct(market.totalYes, total);
   const noPct = 100 - yesPct;
@@ -393,7 +454,8 @@ function MarketDetail({ market, currentBlock, betAmount, setBetAmount, stakeData
           <OutcomePanel label="YES" pct={yesPct} pool={market.totalYes} tone="yes" />
           <OutcomePanel label="NO" pct={noPct} pool={market.totalNo} tone="no" />
         </div>
-        <div className="h-4 overflow-hidden rounded-full border border-white/10 bg-red-500/20"><div className="h-full bg-gradient-to-r from-[var(--ritual-green)] to-[var(--ritual-lime)]" style={{ width: `${yesPct}%` }} /></div>
+        <Sparkline values={trend} />
+        <div className="mt-5 h-4 overflow-hidden rounded-full border border-white/10 bg-red-500/20"><div className="h-full bg-gradient-to-r from-[var(--ritual-green)] to-[var(--ritual-lime)] transition-all duration-700" style={{ width: `${yesPct}%` }} /></div>
         <div className="mt-8 grid gap-3 sm:grid-cols-4">
           <Line label="Target" value={`${comparatorLabel[market.comparator]} ${market.target}`} />
           <Line label="jq path" value={market.jsonPath} />
@@ -428,6 +490,30 @@ function MarketDetail({ market, currentBlock, betAmount, setBetAmount, stakeData
   );
 }
 
+function Sparkline({ values, compact = false }: { values: number[]; compact?: boolean }) {
+  const width = compact ? 320 : 760;
+  const height = compact ? 58 : 180;
+  const path = sparklinePath(values, width, height);
+  const last = values[values.length - 1] ?? 50;
+  const first = values[0] ?? last;
+  const rising = last >= first;
+  return (
+    <div className={`relative overflow-hidden rounded-xl border border-white/10 bg-black/35 ${compact ? "h-[58px]" : "h-[180px]"}`}>
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full" preserveAspectRatio="none" role="img" aria-label="Market odds sparkline">
+        <defs>
+          <linearGradient id={`spark-${compact ? "c" : "d"}`} x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stopColor={rising ? "#19D184" : "#EF4444"} stopOpacity="0.25" />
+            <stop offset="100%" stopColor={rising ? "#BFFF00" : "#FF1DCE"} stopOpacity="0.9" />
+          </linearGradient>
+        </defs>
+        <path d={path} fill="none" stroke={`url(#spark-${compact ? "c" : "d"})`} strokeWidth={compact ? 4 : 5} strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={width} cy={height - (last / 100) * height} r={compact ? 3 : 5} fill={rising ? "#BFFF00" : "#FF1DCE"} />
+      </svg>
+      {!compact && <div className="absolute right-4 top-3 rounded-lg border border-white/10 bg-black/45 px-3 py-1 font-mono text-xs text-gray-300">Live odds trace</div>}
+    </div>
+  );
+}
+
 function OutcomePanel({ label, pct, pool, tone }: { label: string; pct: number; pool: bigint; tone: "yes" | "no" }) {
   const isYes = tone === "yes";
   return <div className={`rounded-xl border p-5 ${isYes ? "border-[var(--ritual-green)]/30 bg-[var(--ritual-green)]/10" : "border-red-400/30 bg-red-500/10"}`}><p className="text-sm font-semibold text-gray-300">{label}</p><p className={`mt-2 font-mono text-5xl font-bold ${isYes ? "text-[var(--ritual-green)]" : "text-red-300"}`}>{pct}%</p><p className="mt-3 font-mono text-sm text-gray-400">Pool {formatEther(pool)} RITUAL</p></div>;
@@ -452,3 +538,4 @@ function Line({ label, value, highlight }: { label: string; value: string; highl
 function EmptyState({ text }: { text: string }) {
   return <div className="rounded-xl border border-dashed border-white/15 bg-black/35 p-8 text-center text-gray-400">{text}</div>;
 }
+
