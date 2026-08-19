@@ -1,108 +1,139 @@
-# Ritual Predict
+# Aetherion Ritual Predict
 
-A self-resolving binary prediction market on [Ritual Chain](https://docs.ritualfoundation.org).
+Aetherion Ritual Predict is my fork of `cozfuttu/ritual-chain-workshop-2`, extended into a self-resolving prediction market project with local verification and a Vercel-ready demo frontend.
 
-Create a market like _"Will ETH/USD be at least $4,000 when this market resolves?"_, stake native
-RITUAL on YES or NO, and watch it settle itself. When the betting window closes, **nobody presses a
-resolve button and no backend cron job runs**. The Ritual Scheduler wakes the contract at a block
-fixed when the market was created; the contract calls the HTTP precompile to read the configured
-oracle URL, extracts one number with the jq precompile, compares it to the target, and settles.
-Winners then pull their proportional share of the pool.
+The original workshop focuses on a prediction market that resolves itself on Ritual Chain. Users create YES/NO markets, bet native RITUAL, and rely on Ritual's Scheduler to trigger resolution after the betting window closes. The contract reads oracle data through Ritual's HTTP precompile, extracts the needed value with jq, compares it to the market rule, and lets winners claim payouts.
 
----
+Because the Ritual testnet was unavailable during final submission, I focused on work that can still be reviewed: contract implementation, local tests, local build verification, and an interactive frontend demo.
 
-## Architecture
+## What I Built
 
-```
-                 createMarket()                    ┌──────────────────────────┐
-   user  ─────────────────────────────────────────▶│  RitualPredict.sol       │
-   user  ─────────── bet(id, YES|NO) ─────────────▶│                          │
-                                                   │  markets, pools, stakes  │
-                                     schedule() ◀──┤                          │
-                                                   └──────────────────────────┘
-    ┌─────────────────────────────┐                     ▲              │
-    │ Scheduler  0x56e7…D58B      │  onScheduledResolve │              │ deposit()
-    │ system contract             │─────────────────────┘              ▼
-    │ fires at resolveBlock,      │                        ┌────────────────────────┐
-    │ 3 attempts, 200 blocks apart│                        │ RitualWallet 0x532F…   │
-    └─────────────────────────────┘                        │ prepaid execution fees │
-                                                           └────────────────────────┘
-                        inside that one scheduled transaction:
+- Implemented and tested the `RitualPredict` contract flow in `hardhat/contracts/RitualPredict.sol`.
+- Added Solidity tests in `hardhat/test/RitualPredict.t.sol`.
+- Added a Vercel-ready Next.js frontend in `web/`.
+- Added demo mode so reviewers can interact with the prediction market while the chain is down.
+- Built a compact market-board UI with multiple clickable prediction cards.
+- Added focused fullscreen betting pages for each market.
+- Added animated demo behavior: ticking block number, drifting odds, changing pools, and moving charts.
+- Added `LOCAL_VERIFICATION.md` with the final checks that passed locally.
 
-   TEEServiceRegistry 0x9644…  ──pickServiceByCapability(HTTP_CALL)──▶  executor address
-   HTTP precompile    0x0801   ──GET oracleUrl (in a TEE)───────────▶  demo oracle
-   jq  precompile     0x0803   ──jsonPath, outputType=uint256───────▶  observed value
-                                          │
-                                          ▼
-                        observed ⋈ target  →  Resolved(YES|NO)
-                        read failed 3×     →  Invalid (everyone refunds)
+## Repository Map
+
+```text
+.
+├── hardhat/
+│   ├── contracts/RitualPredict.sol
+│   ├── contracts/ritual/RitualChain.sol
+│   ├── test/RitualPredict.t.sol
+│   └── README.md
+├── web/
+│   ├── app/
+│   ├── components/prediction-market.tsx
+│   ├── lib/
+│   └── README.md
+└── LOCAL_VERIFICATION.md
 ```
 
----
+## Contract Lifecycle
 
-### Design decisions worth knowing
+1. A user creates a market with a question, oracle URL, jq path, target value, comparator, betting duration, and resolution delay.
+2. The contract converts human-readable durations into block numbers.
+3. The market is scheduled for automatic resolution through Ritual Scheduler.
+4. Users bet YES or NO with native RITUAL before the close block.
+5. When the scheduled block arrives, the Scheduler calls the contract.
+6. The contract selects a TEE executor, reads oracle data with the HTTP precompile, parses a value with jq, and compares it to the target.
+7. The market becomes resolved if the oracle read succeeds, or invalid/refundable if resolution fails after retries.
+8. Winners claim payouts through a pull-based claim function.
 
-**Deadlines are block numbers, not timestamps.** The Scheduler fires at a _block_, so betting also
-closes at a _block_. That way "betting is closed" and "the Scheduler woke us" can never disagree,
-whatever the chain's block time does. `createMarket` takes human durations in seconds and converts
-them using the `blockTimeMs` fixed at deployment. Nothing on-chain reads `block.timestamp`.
+## Ritual Architecture
 
-**On Ritual Chain, `block.timestamp` is Unix milliseconds** (≈`1.786e12`), not seconds — verified
-against the live chain, not assumed. That is a good reason to avoid it entirely, which this contract
-does. Measured block time was ≈195 ms when this was written; run
-`npx hardhat run scripts/block-time.ts` to check it for yourself.
+```text
+User creates market
+        |
+        v
+RitualPredict stores rule + schedules callback
+        |
+        v
+Users bet YES / NO until close block
+        |
+        v
+Ritual Scheduler calls onScheduledResolve()
+        |
+        v
+TEE executor performs HTTP oracle read
+        |
+        v
+jq precompile extracts a uint256 value
+        |
+        v
+Contract compares observed value to target
+        |
+        v
+Resolved market or refundable invalid market
+```
 
-**A failed oracle read is never a NO.** `onScheduledResolve` treats a precompile failure, a non-200
-response, an undecodable envelope, an executor error message, and an unparseable body all as
-_failures_, not as a negative outcome. The response decode happens through an external `try`, so
-malformed bytes surface as a caught failure instead of reverting the execution and rolling back the
-attempt counter.
+## Local Verification
 
-**Retries are the Scheduler's own mechanism.** `createMarket` books `numCalls = 3` executions
-`frequency = 200` blocks apart in a single `schedule()` call. Attempt 1 lands at `resolveBlock`; if
-it succeeds, the contract `cancel()`s the remainder; if all three fail, the market becomes `Invalid`
-and every stake is refundable. Each attempt re-rolls the TEE executor seed, so one unhealthy
-executor cannot sink a market. The callback is idempotent, so a leftover execution is harmless.
-
-**No executor is hardcoded.** The contract calls
-`TEEServiceRegistry.pickServiceByCapability(HTTP_CALL, true, seed, 8)` at resolution time.
-
-**Payouts are pull-based and loop-free.** `claimWinnings` computes
-`stake × totalPool ÷ winningPool` for the caller only. Integer division leaves sub-wei dust in the
-contract; that is deliberate and negligible.
-
-**Empty winning side → refundable.** Pari-mutuel has no denominator when nobody backed the winning
-answer, so the market records the outcome and observed value, then becomes `Invalid` so everyone
-takes their stake back.
-
-**Resolution parameters are immutable.** `target`, `comparator`, `oracleUrl`, `jsonPath`, and
-`resolveBlock` have no setter. The `ResolutionRuleSet` event records them at creation.
-
----
-
-## Prerequisites
-
-- Node.js 20+ and `pnpm`
-- A wallet with testnet RITUAL from <https://faucet.ritualfoundation.org>
-
-## Setup
+Final local checks completed:
 
 ```bash
 cd hardhat
-pnpm install
-cp .env.example .env
+pnpm exec hardhat test
 ```
 
----
+Result:
 
-## Scope
+```text
+8 passing (8 solidity)
+```
 
-Intentionally not included: an AMM, an order book, an order-matching engine, governance, a separate
-ERC-20, a centralized resolver, or an upgrade proxy. Staking uses the chain's native asset and the
-betting model is plain pari-mutuel: two running totals and one mapping per side.
+```bash
+cd web
+pnpm run build
+```
 
-## Reference
+Result: Next.js production build passed.
 
-- Ritual Chain docs — <https://docs.ritualfoundation.org>
-- dApp skills — <https://github.com/ritual-foundation/ritual-dapp-skills>
-- Explorer — <https://explorer.ritualfoundation.org> · Faucet — <https://faucet.ritualfoundation.org>
+The final verification record is also written in `LOCAL_VERIFICATION.md`.
+
+## Frontend Demo
+
+The frontend is inside `web/` and is ready for Vercel.
+
+Demo mode exists because the Ritual testnet was unavailable. In demo mode, the app does not need a live contract address. It shows sample markets and lets reviewers interact with:
+
+- market cards
+- fullscreen betting pages
+- simulated YES/NO bets
+- animated odds
+- moving sparklines
+- block ticks
+- local claim/refund actions
+
+For Vercel, set the project root to:
+
+```text
+web
+```
+
+Use demo mode:
+
+```text
+NEXT_PUBLIC_DEMO_MODE=true
+```
+
+For live mode later:
+
+```text
+NEXT_PUBLIC_DEMO_MODE=false
+NEXT_PUBLIC_RITUAL_PREDICT_ADDRESS=<deployed RitualPredict contract>
+NEXT_PUBLIC_RITUAL_RPC_URL=https://rpc.ritualfoundation.org
+```
+
+No private key is used in the frontend. Wallet actions are signed by the user's browser wallet.
+
+## Notes
+
+This fork keeps the default repository name expected by the workshop verification flow: `ritual-chain-workshop-2`.
+
+The work is intentionally reviewable without live chain access. The contract tests prove the core behavior locally, and the frontend demo shows how the market would feel when used by participants.
